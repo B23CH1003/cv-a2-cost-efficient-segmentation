@@ -193,8 +193,7 @@ photo & object & conditions & area (\%) & IoU & BF1 \\\midrule
                             for k, pf in enumerate(cap_figs))
         for a, b in (("@@DESCROWS@@", desc_rows), ("@@MEANAREA@@", f"{mean_area:.1f}"), ("@@FIGS@@", figs)):
             cap_section = cap_section.replace(a, b)
-        cap_fail = r"""\paragraph{Captured photos.} Results are uneven ($Q=@@Q@@$ overall, per-photo object IoU from @@MINI@@ to @@MAXI@@, Table~\ref{tab:cap}); with eight photos, this overall number is dominated by a few easy cases and should not be read
-as better or worse generalisation than DUTS-TE. The strongest results (item7 bottle @@I7@@, item1 backpack @@I1@@, item5 banana @@I5@@, item6 dustbin @@I6@@) are large, saturated or high-contrast objects on a plain, low-texture background,
+        cap_fail = r"""\paragraph{Captured photos.} Overall $Q=@@Q@@$, with per-photo object IoU from @@MINI@@ to @@MAXI@@ (Table~\ref{tab:cap}). The strongest results (item7 bottle @@I7@@, item1 backpack @@I1@@, item5 banana @@I5@@, item6 dustbin @@I6@@) are large, saturated or high-contrast objects on a plain, low-texture background,
 which is what the colour-contrast and border-contact cues of the model reward. The weakest photo is \textbf{item2} (bicycle on the lawn, IoU @@I2@@): only the central frame and the rear part are found, together with a patch of hedge; the front wheel (thin rim and spokes) is missed.
 The black bicycle has colours close to the dark hedge, and thin spoked wheels cannot be represented at the $64{\times}64$ working resolution.
 The other three photos of Figure~\ref{fig:cap2} are found completely but slightly enlarged: item8 (bicycle in hard sunlight, IoU @@I8@@, predicted area @@A8@@\% against @@G8@@\% true), item4 (cat on the stairs, IoU @@I4@@, @@A4@@\% against @@G4@@\%) and
