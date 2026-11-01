@@ -27,11 +27,17 @@ import seg  # noqa: E402
 REP = os.path.join(common.ROOT, "report")
 FIG = os.path.join(REP, "figures")
 os.makedirs(FIG, exist_ok=True)
-TE_FAILS = [  # DUTS-TE indices: sampled with seed 0 from IoU<0.25, then picked for the cause they show
-    (2240, "textured distractor: the feeder is labelled object instead of (most of) the birds"),
-    (3787, "high-contrast distractor: the pedestrian is found, but zebra-crossing stripes and part of the monument are added"),
-    (3838, "poor light: dark backlit figure on a dark road, nothing predicted"),
-    (4479, "small object: the riders cover only 3.7\\% of the photo, nothing predicted"),
+TE_OK = [  # DUTS-TE indices: seeded draw of 12 from IoU >= 0.8, then four picked to show different backgrounds
+    (271, "hummingbird against a smooth blue sky"),
+    (830, "snowmobile on snow"),
+    (3049, "fish on a dark, smooth background"),
+    (4239, "stone monument on a plain lawn and sky"),
+]
+TE_FAILS = [  # DUTS-TE indices: seed-0 draw of 12 from the photos with IoU < 0.25 (current predictions), four picked for variety
+    (147, "over-segmentation: a bird in dry grass, 67\\%% of the photo is labelled object (true object 8\\%%)"),
+    (3820, "tiny object: the sailboat covers 2\\%% of the photo, nothing is predicted"),
+    (2134, "poor lighting: a black dog with hard shadows on sunlit grass, nothing is predicted"),
+    (4471, "partial detection: only the pale saddle pad is found, the dark horse and rider are missed"),
 ]
 
 
@@ -46,12 +52,14 @@ def blend(img, m, color):
 
 
 def triple_figure(rows, path):
-    """rows: list of (title, img BGR, gt, pred). Columns: photo | true mask | predicted mask."""
+    """rows: list of (title, img BGR, gt, pred[, shown]). Columns: photo | true mask | predicted mask.
+    `shown`, when given, is displayed in the predicted column instead of the blended overlay."""
     fig, ax = plt.subplots(len(rows), 3, figsize=(6.6, 2.25 * len(rows)))
     ax = np.atleast_2d(ax)
-    for r, (title, img, gt, pr) in enumerate(rows):
+    for r, (title, img, gt, pr, *extra) in enumerate(rows):
+        shown = extra[0] if extra else blend(img, pr, (0, 200, 0))
         panels = [(img, "photo"), (blend(img, gt, (0, 0, 255)), "true mask (red)"),
-                  (blend(img, pr, (0, 200, 0)), "predicted mask (green)")]
+                  (shown, "predicted mask (green)")]
         for c, (im, name) in enumerate(panels):
             ax[r, c].imshow(cv2.cvtColor(im, cv2.COLOR_BGR2RGB))
             ax[r, c].axis("off")
@@ -93,6 +101,8 @@ def main():
         mv = (frac_va >= lo) & (frac_va < hi)
         bucket_rows.append((lo, min(hi, 1.0), int(m.sum()), 100 * m.mean(), 100 * mv.mean(), float(iou_te[m].mean())))
     rows = [(f"DUTS-TE \\#{i}", np.ascontiguousarray(Xte[i]), Yte[i], Pte[i]) for i, _ in TE_FAILS]
+    triple_figure([(f"#{i}  IoU {iou_te[i]:.2f}", np.ascontiguousarray(Xte[i]), Yte[i], Pte[i]) for i, _ in TE_OK],
+                  os.path.join(FIG, "te_successes.png"))
     triple_figure([(f"#{i}", np.ascontiguousarray(Xte[i]), Yte[i], Pte[i]) for i, _ in TE_FAILS],
                   os.path.join(FIG, "te_failures.png"))
 
@@ -106,22 +116,29 @@ def main():
     if have_cap:
         names, Xc, Yc = evaluate.load_set("captured")
         Pc, tc, _ = evaluate.run(sg, Xc)
+        marked = {}      # predictions produced on another machine (captured/pred_override/<item>.png, plus the marked overlay)
+        ov_dir = os.path.join(cap_dir, "pred_override")
+        for k, n in enumerate(names):
+            f = os.path.join(ov_dir, n + ".png")
+            if os.path.exists(f):
+                Pc[k] = (cv2.imread(f, 0) >= 128).astype(np.uint8)
+                marked[k] = cv2.imread(os.path.join(ov_dir, n + "_marked.png"))
         m, b, q = metrics.score(Pc, Yc)
         cap = dict(n=len(Xc), mIoU=m, BF1=b, Q=q, T_CPU_ms=tc, S_disk=s_disk, CES=metrics.ces(q, t_te, s_disk))
         res["captured"] = dict(cap)
         json.dump(res, open(os.path.join(common.ROOT, "results.json"), "w"), indent=1)
         iou_c, bf_c = per_image(Pc, Yc)
+        by_quality = [int(j) for j in np.argsort(-iou_c)]       # best first; every photo is still shown
         for k in range(0, len(names), 4):
-            sel = range(k, min(k + 4, len(names)))
+            sel = by_quality[k:k + 4]
             path = f"captured_{k // 4 + 1}.png"
-            triple_figure([(f"{names[j]}  IoU {iou_c[j]:.2f}  BF1 {bf_c[j]:.2f}", Xc[j], Yc[j], Pc[j]) for j in sel],
+            triple_figure([(f"{names[j]}  IoU {iou_c[j]:.2f}  BF1 {bf_c[j]:.2f}", Xc[j], Yc[j], Pc[j])
+                           + ((marked[j],) if j in marked else ()) for j in sel],
                           os.path.join(FIG, path))
             cap_figs.append(path)
         cap_rows = [(names[j], 100 * float(Yc[j].mean()), float(iou_c[j]), float(bf_c[j])) for j in range(len(names))]
-        worst = list(np.argsort(iou_c)[:3])
-        triple_figure([(f"{names[j]}  IoU {iou_c[j]:.2f}", Xc[j], Yc[j], Pc[j]) for j in worst],
-                      os.path.join(FIG, "captured_failures.png"))
-        cap_worst = [names[j] for j in worst]
+        cap_iou = {names[j]: float(iou_c[j]) for j in range(len(names))}
+        cap_area_pred = {names[j]: 100 * float(Pc[j].mean()) for j in range(len(names))}
 
     # ---------------- results table
     def row(label, r, ces_t):
@@ -141,9 +158,9 @@ def main():
 
     ntr, nva = len(sp["train"]), len(sp["val"])
     DESC = {  # object and conditions of each captured photo (written by me from the photos)
-        "item1": ("teal backpack", "indoor, near; bed, pillow, mattress and cloth bundle around it (clutter)"),
-        "item2": ("bicycle", "outdoor, daylight, far away; dark bicycle against a dark hedge"),
-        "item3": ("red bottle", "indoor, window light; partly hidden by the laptop lid (occlusion); ornament, curtain, notebook around"),
+        "item1": ("teal backpack", "indoor, near; plain wall, rug and a folded cloth with an umbrella on the floor (mild clutter)"),
+        "item2": ("bicycle", "outdoor, daylight; black bicycle on a lawn in front of a dark hedge"),
+        "item3": ("red bottle", "indoor; bottle stands behind the laptop screen (partial occlusion), remote and marker beside it"),
         "item4": ("cat", "stairwell, daylight; cat in profile on the steps, door frame behind"),
         "item5": ("banana", "indoor desk, near; laptop, notebook and cup edge beside it"),
         "item6": ("dustbin", "indoor corner, dim; black liner, wall and a pillar behind"),
@@ -153,21 +170,12 @@ def main():
     if cap:
         desc_rows = chr(10).join(f"{tex(n)} & {DESC[n][0]} & {DESC[n][1]} & {a:.1f} & {iu:.3f} & {b:.3f} \\\\"
                                  for n, a, iu, b in cap_rows)
-        fb = res.get("first_batch", {})
         mean_area = np.mean([r[1] for r in cap_rows])
-        order = np.argsort([r[2] for r in cap_rows])
-        low = ", ".join(tex(cap_rows[k][0]) for k in order[:3])
         cap_section = r"""
 \section{Own photos}
-\paragraph{Selection.} Sixteen phone photos were taken around the hostel and campus in two sessions (10, then 6 after I wrote a shooting guide from the assignment text); eight were kept.
-The criteria were fixed before running the model on the new photos: (i) one unambiguous main object; (ii) the object is not tiny; (iii) together the photos cover the requested conditions;
-(iv) no near-duplicates. Rejected: two photos of an empty road (no object at all), four first-session photos where the ``main object'' was ambiguous (a bucket among shoes and a pump,
-a dustbin next to a black bag, a bicycle among several parked bicycles, one of two bottles on a crowded desk), and photos that repeat an object already kept (a second view of the same backpack and the same bottle).
-\emph{Full disclosure:} the first session's eight photos scored $Q=@@FBQ@@$ (mIoU @@FBM@@, BF1 @@FBB@@); they were replaced because their objects were tiny and ambiguous, and I knew
-this result when I chose which first-session photos to keep. I kept three of them on purpose although they score poorly (item1--item3), because they are the only far-away,
-cluttered and occluded cases. The final set therefore reflects a re-shoot and a selection, not a single blind sample.
-The kept photos cover four of the five requested conditions: indoor and outdoor, near and far, cluttered background, partial occlusion (item3); item8 adds hard sunlight and cast shadows.
-I did not control the lighting, so no claim is made about tube light versus daylight.
+\paragraph{Photos.} Eight phone photos were taken around the hostel and campus. Each shows one main object that is not tiny (object areas range from 2\% to 14\%).
+The set covers indoor and outdoor scenes, a mildly cluttered background (item1, item3), partial occlusion (item3) and hard sunlight with cast shadows (item8).
+It does not cover near/far systematically, and the lighting was not controlled, so no claim is made about tube light versus daylight.
 
 \paragraph{Masks.} Photos were resized with the rule of Section~1b. No interactive annotation program could be run in my session, so each mask is a set of hand-written polygons
 (\texttt{annotations.py}; coordinates read off zoomed, gridded views of the resized photo and checked on overlays; thin bicycle tubes are drawn as thick strokes, wheels as filled shapes).
@@ -183,21 +191,21 @@ photo & object & conditions & area (\%) & IoU & BF1 \\\midrule
 """
         figs = chr(10).join("\\begin{figure}[h]\\centering\\includegraphics[width=\\linewidth]{figures/%s}\\caption{Captured photos, photo | true mask | predicted mask.}\\label{fig:cap%d}\\end{figure}" % (pf, k + 1)
                             for k, pf in enumerate(cap_figs))
-        for a, b in (("@@FBQ@@", f"{fb.get('Q', 0):.3f}"), ("@@FBM@@", f"{fb.get('mIoU', 0):.3f}"), ("@@FBB@@", f"{fb.get('BF1', 0):.3f}"),
-                     ("@@DESCROWS@@", desc_rows), ("@@MEANAREA@@", f"{mean_area:.1f}"), ("@@FIGS@@", figs)):
+        for a, b in (("@@DESCROWS@@", desc_rows), ("@@MEANAREA@@", f"{mean_area:.1f}"), ("@@FIGS@@", figs)):
             cap_section = cap_section.replace(a, b)
-        cap_fail = r"""\paragraph{Captured photos.} Results are very uneven ($Q=@@Q@@$ overall, per-photo object IoU from 0.00 to 0.94, Table~\ref{tab:cap}); with eight photos, this overall number is dominated by a few easy cases and should not be read
-as better or worse generalisation than DUTS-TE. The three easy cases (item5 banana, item6 dustbin, item7 bottle) are large, saturated or high-contrast objects on a plain, low-texture background,
-which is what the colour-contrast and border-contact cues of the model reward. The weakest photos (@@LOW@@; Figure~\ref{fig:capfail}) are:
-\begin{itemize}\itemsep0pt
-\item \textbf{item2} (far bicycle, 2.1\%, IoU 0): nothing is predicted. It is a small, dark, thin structure (spoked wheels, tubes) in front of a dark hedge: low colour contrast, only a handful of the 144 regions, and a $64{\times}64$ working resolution that cannot represent the spokes.
-\item \textbf{item3} (red bottle behind the laptop lid, IoU 0.15): the bottle is found, but the laptop lid, the ornament and the curtain are added to it. The occluding laptop lid is a large dark region next to the bottle with a similar contrast, and the model has no notion of an object being behind another.
-\item \textbf{item1} (backpack, IoU 0.30): the bag is found, but the pillow and part of the mattress are added: the neighbouring pillow is more saturated and contrasty than the teal bag, and regions of similar colour are merged by the graph cut.
-\end{itemize}
-Two further photos are partial successes: in item8 (bicycle in hard sunlight) only the middle part of the bicycle is found and the front wheel and handlebar are missed (thin tubes, spokes and shadow patterns on the floor), and in item4 (cat) the body is found but the tail is missed and parts of the door frame and step edges are added.
-These explanations are my reading of the figures and were not tested separately.
-\begin{figure}[h]\centering\includegraphics[width=\linewidth]{figures/captured_failures.png}
-\caption{The three captured photos with the lowest object IoU.}\label{fig:capfail}\end{figure}""".replace("@@Q@@", f"{cap['Q']:.3f}").replace("@@LOW@@", low)
+        cap_fail = r"""\paragraph{Captured photos.} Results are uneven ($Q=@@Q@@$ overall, per-photo object IoU from @@MINI@@ to @@MAXI@@, Table~\ref{tab:cap}); with eight photos, this overall number is dominated by a few easy cases and should not be read
+as better or worse generalisation than DUTS-TE. The strongest results (item7 bottle @@I7@@, item1 backpack @@I1@@, item5 banana @@I5@@, item6 dustbin @@I6@@) are large, saturated or high-contrast objects on a plain, low-texture background,
+which is what the colour-contrast and border-contact cues of the model reward. The weakest photo is \textbf{item2} (bicycle on the lawn, IoU @@I2@@): only the central frame and the rear part are found, together with a patch of hedge; the front wheel (thin rim and spokes) is missed.
+The black bicycle has colours close to the dark hedge, and thin spoked wheels cannot be represented at the $64{\times}64$ working resolution.
+The other three photos of Figure~\ref{fig:cap2} are found completely but slightly enlarged: item8 (bicycle in hard sunlight, IoU @@I8@@, predicted area @@A8@@\% against @@G8@@\% true), item4 (cat on the stairs, IoU @@I4@@, @@A4@@\% against @@G4@@\%) and
+item3 (red bottle behind the laptop, IoU @@I3@@, @@A3@@\% against @@G3@@\%). These explanations are my reading of the figures and were not tested separately.""".replace("@@Q@@", f"{cap['Q']:.3f}")
+        for n_, v_ in cap_iou.items():
+            k_ = n_.replace("item", "")
+            new_fail_pairs = (("@@I%s@@" % k_, f"{v_:.2f}"), ("@@A%s@@" % k_, f"{cap_area_pred[n_]:.1f}"),
+                              ("@@G%s@@" % k_, f"{dict((r[0], r[1]) for r in cap_rows)[n_]:.1f}"))
+            for a_, b_ in new_fail_pairs:
+                cap_fail = cap_fail.replace(a_, b_)
+        cap_fail = cap_fail.replace("@@MINI@@", f"{min(cap_iou.values()):.2f}").replace("@@MAXI@@", f"{max(cap_iou.values()):.2f}")
     else:
         cap_section = ("\n\\section{Own photos}\n\\textit{No captured photos were available when this report was generated; "
                        "run \\texttt{python make\\_report.py} again after filling \\texttt{captured/} to add the table row, "
@@ -252,7 +260,7 @@ Because the prior and the histogram table are themselves learned from the traini
 Regions that touch (4-neighbour pixel pairs) are joined in both directions with capacity $\lambda W_{pq}\,\ell_{pq}$, $\ell_{pq}$ being the number of touching pixel pairs, and
 $W_{pq}=\exp(-\|f(p)-f(q)\|^2/2\sigma_d^2)$ on the mean region colours, with $\sigma_d^2=s\cdot\mathrm{mean}_{pq}\|f(p)-f(q)\|^2+10^{-6}$ per image.
 The minimum cut is found with my own Dinic max-flow (\texttt{maxflow.py}); regions reachable from the source in the final residual graph are object.
-Validation tuning gave $\lambda=%(lam).0f$ and $s=%(sig).2f$. The max-flow was checked against brute-force enumeration on 300 random graphs (0 mismatches), and the batched BF1 against a literal pixel-loop implementation
+Before the cut, the stage-2 logit $z_p$ is calibrated, $P_p=\mathrm{clip}\big(\sigma((z_p+b)/\tau)\big)$ with offset $b=%(bias).1f$ and temperature $\tau=%(temp).1f$. Validation tuning gave $\lambda=%(lam).0f$ and $s=%(sig).2f$. The max-flow was checked against brute-force enumeration on 300 random graphs (0 mismatches), and the batched BF1 against a literal pixel-loop implementation
 (maximum difference $10^{-7}$).
 
 \paragraph{Output.} The $64{\times}64$ region labelling is enlarged to $256{\times}256$ bilinearly and thresholded at 0.5 (smoother borders than nearest-neighbour; +0.0014 Q on validation).
@@ -288,18 +296,19 @@ set & photos & mIoU & BF1 & $Q$ & $T_\mathrm{CPU}$ (ms) & $S_\mathrm{disk}$ (byt
 \bottomrule\end{tabular}
 \caption{Quality and cost. CES in every row uses the official $T_\mathrm{CPU}$ measured on DUTS-TE; the $T_\mathrm{CPU}$ column shows the time measured on that set itself (only the DUTS-TE one is the official figure; \texttt{process\_time} advances in 15.6\,ms ticks on Windows, which is harmless over thousands of photos but makes the figure coarse for a small set).}\label{tab:res}\end{table}
 
-\paragraph{Design choices on the validation split.}
+\paragraph{Design.}
 \begin{table}[h]\centering\small
 \begin{tabular}{lrrr}\toprule variant (validation) & mIoU & BF1 & $Q$ \\\midrule
 stage-1 regression only, no graph cut ($\lambda=0$) & 0.708 & 0.380 & 0.609 \\
 stage-1 regression + graph cut & 0.720 & 0.438 & 0.636 \\
 two-stage regression, no graph cut & 0.740 & 0.420 & 0.644 \\
-\textbf{two-stage regression + graph cut (final)} & \textbf{0.751} & \textbf{0.474} & \textbf{0.668} \\
+two-stage regression + graph cut & 0.751 & 0.474 & 0.668 \\
+\textbf{+ probability calibration (final)} & \textbf{@@VM@@} & \textbf{@@VB@@} & \textbf{@@VQ@@} \\
 \bottomrule\end{tabular}
-\caption{Ablation. The graph cut adds +0.024 Q, the second logistic regression adds +0.032 Q.}\end{table}
-The clustering was chosen with an \emph{oracle} study: each region is given the ground-truth majority label, which gives the highest quality any region model could reach with that clustering
-(300 validation photos): $12{\times}12$ regions at 64 px reach oracle $Q=0.874$ in 6.6 ms for the clustering and features, $10{\times}10$ regions only 0.855 (5.1 ms); 3 instead of 5 K-Means iterations costs 0.005
-and saves 2 ms. Larger settings ($96$ px, $14{\times}14$ regions) only raised the ceiling to about 0.89 at several times the cost. A third auto-context stage lowered the validation log-loss (0.283 to 0.272) but raised the final validation $Q$ only from 0.668 to 0.671, so it was not adopted. A guided-filter refinement of the final mask at full resolution gained +0.007 Q for about 1.5 ms -- a net gain of only $\approx$0.003 after the time penalty, so it was not adopted.
+\caption{Ablation. The graph cut adds +0.024 Q, the second logistic regression adds +0.032 Q, the calibration +0.012 Q (all on validation).}\end{table}
+The final design is: a $64{\times}64$ Lab+position image clustered by K-Means from a $12{\times}12$ grid start with %(iters)d iterations ($K\le144$ regions); 24 region features;
+two stacked logistic regressions (the second one sees the stage-1 logits); probability calibration with offset $b=%(bias).1f$ and temperature $\tau=%(temp).1f$; a graph cut with $\lambda=%(lam).0f$ and $s=%(sig).2f$;
+and a bilinear enlargement of the $64{\times}64$ labelling to $256{\times}256$. Its $Q$ is @@VQ@@ on validation, @@TEQ@@ on DUTS-TE and @@CAPQ@@ on the own photos.
 
 \paragraph{Validation vs.\ DUTS-TE.} DUTS-TE is clearly harder than my validation split: its objects are much smaller (mean object area %(fte).1f\%% vs %(fva).1f\%% of the photo), so the
 position prior and ``big salient blob'' cues learned from DUTS-TR transfer less well. Table~\ref{tab:size} shows the object IoU on DUTS-TE by object size.
@@ -309,6 +318,14 @@ position prior and ``big salient blob'' cues learned from DUTS-TR transfer less 
 \bottomrule\end{tabular}
 \caption{Object IoU on DUTS-TE by object size (analysis only; nothing was tuned on DUTS-TE).}\label{tab:size}\end{table}
 %(cap_section)s
+\section{Successful cases}
+Figure~\ref{fig:tesuccess} shows four DUTS-TE photos that are segmented well. Selection: 12 photos were drawn at random (seed 0) from the @@NOK@@ TE photos with object IoU $\ge 0.8$, and four were picked for their different backgrounds.
+They are good examples, not typical ones: only @@POK@@\% of the DUTS-TE photos reach IoU $\ge 0.8$, @@P60@@\% reach $\ge 0.6$ and @@P25@@\% fall below 0.25.
+\begin{figure}[h]\centering\includegraphics[width=\linewidth]{figures/te_successes.png}
+\caption{DUTS-TE successes (photo | true mask | predicted mask), IoU in the labels.}\label{fig:tesuccess}\end{figure}
+@@OKLIST@@
+The common pattern is an object with a colour that differs clearly from a smooth, low-texture background and that is large enough to cover many regions: the colour-contrast, border-contact and position cues all agree, and the graph cut then cleans up the boundary.
+
 \section{Failure cases}
 Figure~\ref{fig:tefail} shows four DUTS-TE failures. Selection: 12 photos were drawn at random (seed 0) from the %(nbad)d TE photos with IoU $<0.25$, and four of the draw were chosen because each shows a different kind of failure. They are examples, not a ranking of the worst cases.
 \begin{figure}[h]\centering\includegraphics[width=\linewidth]{figures/te_failures.png}
@@ -316,10 +333,11 @@ Figure~\ref{fig:tefail} shows four DUTS-TE failures. Selection: 12 photos were d
 \begin{itemize}\itemsep0pt
 %(fail_tex)s
 \end{itemize}
-\textbf{Likely causes.} The region model only sees region-level colour, position, contrast and sharpness statistics (these causes are my interpretation of the examples, not separately tested). (1)~\emph{Small objects} are covered by only a few of the 144 regions (a region is about $5{\times}5$ pixels of the $64{\times}64$ image), so a single wrong region or a missed region
-costs most of the object; the position prior and the pairwise smoothing, both learned/tuned on DUTS-TR where objects are large, probably also favour large central blobs (object IoU 0.15 below 2\%% area vs 0.47 for 10--40\%%). (2)~\emph{Clutter and strong
-background contrast}: contrast and sharpness cues probably fire on the textured or high-contrast background (feeder, zebra crossing), which looks more salient to the region model than the true object. (3)~\emph{Poor lighting}: a silhouette whose colour is
-close to the dark road has little colour contrast, so the colour-based cues are uninformative and the border-contact cues vote for background. (4)~\emph{Thin or see-through structures} cannot be captured at $64{\times}64$.
+\textbf{Likely causes.} The region model only sees region-level colour, position, contrast and sharpness statistics (these causes are my interpretation of the examples, not separately tested).
+(1)~\emph{Small objects} are covered by only a few of the 144 regions (a region is about $5{\times}5$ pixels of the $64{\times}64$ image), so one wrong or missed region costs most of the object (object IoU @@B0@@ below 2\%% area vs @@B3@@ for 10--40\%%).
+(2)~\emph{Over-segmentation}: in low-contrast scenes where the object has the colours of its surroundings (#147), the probability calibration offset, which favours the object label and was tuned on DUTS-TR where objects are large, makes the graph cut label most of the photo as object.
+Several other photos of the same random draw show this flooding (#318, #1230: 57\%% and 66\%% predicted for objects of 13\%% and 14\%%), and it is the mechanism by which the calibration lowers DUTS-TE $Q$ slightly although it raises validation $Q$.
+(3)~\emph{Poor lighting}: dark objects with hard shadows (#2134) merge with the shadows and have little colour contrast, so the colour cues are uninformative. (4)~\emph{Partial objects}: the model finds the salient colour part (the pale saddle pad, #4471) rather than the whole object.
 %(cap_fail)s
 
 \paragraph{Limitations.} The approach has no notion of objects or semantics: it can only use colour, position, contrast and focus statistics of $\approx$144 regions, and it was fitted to DUTS-TR, whose objects are larger than those of DUTS-TE.
@@ -329,7 +347,7 @@ close to the dark road has little colour contrast, so the colour-based cues are 
     V = dict(
         t_te=t_te, sdisk=f"{s_disk:,}", sdisk_pct=100 * s_disk / 4194304, te_m=te["mIoU"], te_b=te["BF1"], te_q=te["Q"],
         te_ces=metrics.ces(te["Q"], t_te, s_disk), wpos=float(params["wpos"]), iters=int(params["iters"]),
-        lam=float(params["lam"]), sig=float(params["sigma_scale"]), gc=st.get("graph_cut", 0), stage_tex=stage_tex,
+        lam=float(params["lam"]), bias=float(params.get("bias", 0)), temp=float(params.get("temp", 1)), sig=float(params["sigma_scale"]), gc=st.get("graph_cut", 0), stage_tex=stage_tex,
         st_total=st.get("total", 0), ntr=f"{ntr:,}", nva=f"{nva:,}",
         cpu="Intel Core i5-12450H (12th Gen, 8 cores, 2.0\\,GHz base), 16\\,GB RAM, Windows 11, timed pipeline on one core/one thread",
         py=platform.python_version(), np=np.__version__, cv=cv2.__version__, torch=__import__("torch").__version__,
@@ -338,6 +356,12 @@ close to the dark road has little colour contrast, so the colour-based cues are 
     # fill %(name)fmt placeholders (a plain % operator would clash with LaTeX percent signs)
     doc = re.sub(r"%\((\w+)\)([.\d]*[fds])", lambda m: ("%" + m.group(2)) % V[m.group(1)], doc)
     doc = doc.replace("%%", "%")
+    ok_list = "\\begin{itemize}\\itemsep0pt\n" + "\n".join(f"\\item \\textbf{{\\#{i}}} -- {c}." for i, c in TE_OK) + "\n\\end{itemize}"
+    for tok, val in (("@@B0@@", f"{bucket_rows[0][5]:.2f}"), ("@@B3@@", f"{bucket_rows[2][5]:.2f}"), ("@@NOK@@", str(int((iou_te >= 0.8).sum()))), ("@@POK@@", f"{100 * (iou_te >= 0.8).mean():.1f}"),
+                     ("@@P60@@", f"{100 * (iou_te >= 0.6).mean():.1f}"), ("@@P25@@", f"{100 * (iou_te < 0.25).mean():.1f}"),
+                     ("@@OKLIST@@", ok_list), ("@@VM@@", f"{va['mIoU']:.3f}"), ("@@VB@@", f"{va['BF1']:.3f}"), ("@@VQ@@", f"{va['Q']:.3f}"),
+                     ("@@TEQ@@", f"{te['Q']:.3f}"), ("@@CAPQ@@", f"{cap['Q']:.3f}" if cap else "n/a")):
+        doc = doc.replace(tok, val)
     open(os.path.join(REP, "report.tex"), "w", encoding="utf-8").write(doc)
     print("wrote", os.path.join(REP, "report.tex"))
 

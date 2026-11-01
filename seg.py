@@ -41,6 +41,13 @@ class Segmenter:
         self.lam = float(params["lam"])
         self.sigma_scale = float(params["sigma_scale"])
         self.upsample = int(params.get("upsample", 0))
+        self.bias = float(params.get("bias", 0.0))        # logit offset / temperature applied before the cut
+        self.temp = float(params.get("temp", 1.0))
+        # size-adaptive offset: bias_small for photos whose predicted object covers <= p_lo of the image,
+        # bias (large) for >= p_hi, log-linear in between
+        self.bias_s = float(params.get("bias_small", self.bias))
+        self.p_lo = float(params.get("p_lo", 0.08))
+        self.p_hi = float(params.get("p_hi", 0.35))
         R, G = self.R, self.G
         self.N = R * R
         self.K = G * G
@@ -258,6 +265,9 @@ class Segmenter:
         if self.has3:
             Z = (self.stage2_features(d, z) - self.mu3) / self.sd3
             z = np.concatenate([Z, Z * Z], 1) @ self.w3 + self.b3
+        pbar = float((d["cnt"] / (1.0 + np.exp(-z))).sum() / d["cnt"].sum())      # predicted object fraction
+        w = min(max((np.log(pbar + 1e-3) - np.log(self.p_lo)) / (np.log(self.p_hi) - np.log(self.p_lo)), 0.0), 1.0)
+        z = (z + self.bias_s + w * (self.bias - self.bias_s)) / self.temp
         return np.clip(1.0 / (1.0 + np.exp(-z)), 0.001, 0.999)
 
     # ------------------------------------------------------------------ stage 4-5
