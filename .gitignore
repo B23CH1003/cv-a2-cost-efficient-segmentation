@@ -1,0 +1,9 @@
+# DUTS data, caches, intermediate photos (about 4.7 GB) - not part of the repo
+data/
+__pycache__/
+*.pyc
+# LaTeX build products
+report/*.aux
+report/*.log
+report/*.out
+report/*.toc
